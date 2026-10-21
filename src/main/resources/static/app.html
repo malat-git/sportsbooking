@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sports Court Booking</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231f4e79'/><text x='16' y='23' font-size='19' text-anchor='middle' fill='white' font-family='Arial' font-weight='bold'>S</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand">Sports Court Booking</div>
+    <nav id="nav">
+      <a data-page="dashboard" class="active">Dashboard</a>
+      <a data-page="facilities">Facilities</a>
+      <a data-page="book">Book a Slot</a>
+      <a data-page="bookings">My Bookings</a>
+      <a data-page="students" class="admin-only">Students</a>
+    </nav>
+    <div class="user-box">
+      <div class="u-name" id="uName"></div>
+      <div class="u-role" id="uRole"></div>
+    </div>
+    <button class="btn btn-light" onclick="logout()">Logout</button>
+  </aside>
+
+  <main class="main">
+    <div class="topbar"><h2 id="pageTitle">Dashboard</h2><span class="muted" id="today"></span></div>
+
+    <section id="page-dashboard" class="page"><div id="dashContent"></div></section>
+
+    <section id="page-facilities" class="page hidden">
+      <div class="panel admin-only">
+        <h3>Add facility</h3>
+        <div class="form-row">
+          <div class="form-group"><label>Facility name</label><input id="fName" placeholder="Badminton Court 1"></div>
+          <div class="form-group"><label>Sport type</label><input id="fSport" placeholder="Badminton"></div>
+          <div class="form-group"><label>Location</label><input id="fLoc" placeholder="Indoor Stadium"></div>
+          <div class="form-group"><label>Opens</label><input id="fOpen" type="time" value="06:00"></div>
+          <div class="form-group"><label>Closes</label><input id="fClose" type="time" value="21:00"></div>
+          <button class="btn" onclick="addFacility()">Add</button>
+        </div>
+      </div>
+      <div class="fac-grid" id="facGrid"></div>
+    </section>
+
+    <section id="page-book" class="page hidden">
+      <div class="panel">
+        <div class="form-row">
+          <div class="form-group admin-only"><label>Book for student</label><select id="bkStudent"></select></div>
+          <div class="form-group"><label>Facility</label><select id="bkFacility"></select></div>
+          <div class="form-group"><label>Date</label><input type="date" id="bkDate"></div>
+          <button class="btn" onclick="loadSlots()">Show slots</button>
+        </div>
+        <div class="legend"><span class="dot free" style="margin-left:0"></span>Available (click to book)<span class="dot busy"></span>Booked / not available</div>
+        <div class="slot-grid" id="slotGrid"></div>
+      </div>
+    </section>
+
+    <section id="page-bookings" class="page hidden">
+      <div class="panel">
+        <div class="form-row">
+          <div class="form-group admin-only"><label>Student</label><select id="hsStudent" onchange="safe(loadBookings)"></select></div>
+          <div class="chips" id="chips">
+            <button class="active" onclick="setFilter('',this)">All</button>
+            <button onclick="setFilter('CONFIRMED',this)">Upcoming</button>
+            <button onclick="setFilter('COMPLETED',this)">Completed</button>
+            <button onclick="setFilter('CANCELLED',this)">Cancelled</button>
+          </div>
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>Facility</th><th>Date</th><th>Time</th><th>Status</th><th></th></tr></thead>
+          <tbody id="histBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="page-students" class="page hidden">
+      <div class="panel">
+        <table>
+          <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Contact</th></tr></thead>
+          <tbody id="stuBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const token = localStorage.getItem('token');
+let me = null, facilities = [], students = [], histStatus = '';
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const hm = t => String(t).slice(0, 5);
+const badge = s => `<span class="badge ${s.toLowerCase()}">${s}</span>`;
+const todayStr = () => new Date().toLocaleDateString('en-CA');
+
+function toast(msg, ok = true) {
+  const t = document.createElement('div');
+  t.className = 'toast ' + (ok ? 'ok' : 'err');
+  t.textContent = msg;
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 3500);
+}
+
+async function api(path, method = 'GET', body) {
+  const r = await fetch('/api' + path, {
+    method,
+    headers: { 'Content-Type': 'application/json', 'X-Auth-Token': token || '' },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401) { localStorage.clear(); location.href = 'index.html'; throw new Error('Session expired'); }
+  if (!r.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function safe(fn) { try { return await fn(); } catch (e) { toast(e.message, false); } }
+
+/* ---------- navigation ---------- */
+const titles = { dashboard: 'Dashboard', facilities: 'Sports Facilities', book: 'Book a Slot', bookings: 'My Bookings', students: 'Registered Students' };
+const loaders = { dashboard: () => loadDashboard(), facilities: () => loadFacilities(), book: () => initBook(), bookings: () => loadBookings(), students: () => loadStudents() };
+
+async function go(page) {
+  document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
+  $('page-' + page).classList.remove('hidden');
+  document.querySelectorAll('#nav a').forEach(a => a.classList.toggle('active', a.dataset.page === page));
+  $('pageTitle').textContent = (page === 'bookings' && me.role === 'ADMIN') ? 'Student Bookings' : titles[page];
+  await safe(loaders[page]);
+}
+
+/* ---------- dashboard ---------- */
+const stat = (n, l) => `<div class="stat"><div class="stat-num">${n}</div><div class="stat-label">${l}</div></div>`;
+
+function bookingTable(rows, showStudent) {
+  if (!rows.length) return '<p class="empty">No bookings yet.</p>';
+  return `<table><thead><tr>${showStudent ? '<th>Student</th>' : ''}<th>Facility</th><th>Date</th><th>Time</th><th>Status</th></tr></thead><tbody>` +
+    rows.map(r => `<tr>${showStudent ? `<td>${esc(r.studentName)}</td>` : ''}<td>${esc(r.facilityName)}</td><td>${r.bookingDate}</td><td>${hm(r.startTime)} - ${hm(r.endTime)}</td><td>${badge(r.status)}</td></tr>`).join('') +
+    '</tbody></table>';
+}
+
+async function loadDashboard() {
+  const d = await api('/dashboard');
+  const admin = me.role === 'ADMIN';
+  let h = `<div class="welcome"><h3>Welcome, ${esc(me.name)}</h3><p>${admin ? 'Overview of all sports court activity.' : 'Your booking summary.'}</p></div>`;
+  if (admin) {
+    h += '<div class="stats">' + stat(d.students, 'Students') + stat(d.facilities, 'Facilities') +
+      stat(d.availableFacilities, 'Facilities available') + stat(d.totalBookings, 'Total bookings') +
+      stat(d.confirmed, 'Upcoming') + stat(d.completed, 'Completed') +
+      stat(d.cancelled, 'Cancelled') + stat(d.today, "Today's bookings") + '</div>';
+    const max = Math.max(1, ...d.perFacility.map(x => x.count));
+    h += '<div class="grid-2"><div class="panel"><h3>Bookings per facility</h3>' +
+      (d.perFacility.map(x => `<div class="bar-row"><span class="bar-label">${esc(x.name)}</span><div class="bar"><div style="width:${x.count / max * 100}%"></div></div><b>${x.count}</b></div>`).join('') || '<p class="empty">No facilities yet.</p>') +
+      '</div><div class="panel"><h3>Recent bookings</h3>' + bookingTable(d.recent, true) + '</div></div>';
+  } else {
+    h += '<div class="stats">' + stat(d.upcoming, 'Upcoming bookings') + stat(d.completed, 'Completed') +
+      stat(d.cancelled, 'Cancelled') + stat(d.availableFacilities, 'Facilities available') + '</div>' +
+      '<div class="panel"><div class="panel-head"><h3>Your next bookings</h3><button class="btn btn-sm" onclick="go(\'book\')">Book a slot</button></div>' +
+      bookingTable(d.upcomingList, false) + '</div>';
+  }
+  $('dashContent').innerHTML = h;
+}
+
+/* ---------- facilities ---------- */
+async function loadFacilities() {
+  facilities = await api('/facilities');
+  $('facGrid').innerHTML = facilities.map(f => `
+    <div class="fac-card">
+      <div class="fac-top"><h4>${esc(f.facilityName)}</h4>${badge(f.status)}</div>
+      <p class="muted">${esc(f.sportType)} | ${esc(f.location || '-')}</p>
+      <p>Hours: ${hm(f.openingTime)} - ${hm(f.closingTime)}</p>
+      <div class="fac-actions">
+        <button class="btn btn-sm" ${f.status !== 'AVAILABLE' ? 'disabled' : ''} onclick="bookFrom(${f.facilityId})">Book</button>
+        ${me.role === 'ADMIN' ? `<button class="btn btn-sm btn-light" onclick="toggleStatus(${f.facilityId},'${f.status}')">${f.status === 'AVAILABLE' ? 'Set maintenance' : 'Set available'}</button>` : ''}
+      </div>
+    </div>`).join('') || '<p class="empty">No facilities yet.</p>';
+}
+
+async function addFacility() {
+  await safe(async () => {
+    await api('/facilities', 'POST', { facilityName: $('fName').value, sportType: $('fSport').value, location: $('fLoc').value, openingTime: $('fOpen').value, closingTime: $('fClose').value });
+    toast('Facility added');
+    ['fName', 'fSport', 'fLoc'].forEach(i => $(i).value = '');
+    loadFacilities();
+  });
+}
+
+async function toggleStatus(id, cur) {
+  await safe(async () => {
+    const next = cur === 'AVAILABLE' ? 'MAINTENANCE' : 'AVAILABLE';
+    await api(`/facilities/${id}/status`, 'PATCH', { status: next });
+    toast('Status changed to ' + next);
+    loadFacilities();
+  });
+}
+
+/* ---------- book a slot ---------- */
+async function initBook() {
+  facilities = await api('/facilities');
+  const keep = $('bkFacility').value;
+  $('bkFacility').innerHTML = facilities.map(f => `<option value="${f.facilityId}">${esc(f.facilityName)} (${esc(f.sportType)})</option>`).join('');
+  if (keep) $('bkFacility').value = keep;
+  if (me.role === 'ADMIN') {
+    students = await api('/students');
+    $('bkStudent').innerHTML = students.map(s => `<option value="${s.studentId}">${s.studentId} - ${esc(s.studentName)}</option>`).join('');
+  }
+  if (!$('bkDate').value) $('bkDate').value = todayStr();
+  $('slotGrid').innerHTML = '';
+}
+
+async function bookFrom(id) {
+  await go('book');
+  $('bkFacility').value = id;
+  loadSlots();
+}
+
+async function loadSlots() {
+  try {
+    const slots = await api(`/facilities/${$('bkFacility').value}/slots?date=${$('bkDate').value}`);
+    $('slotGrid').innerHTML = slots.map(s => `<button class="slot ${s.available ? 'free' : 'busy'}" ${s.available ? '' : 'disabled'} onclick="book('${s.startTime}','${s.endTime}')">${hm(s.startTime)} - ${hm(s.endTime)}</button>`).join('');
+  } catch (e) { $('slotGrid').innerHTML = ''; toast(e.message, false); }
+}
+
+async function book(start, end) {
+  const fac = facilities.find(f => f.facilityId == $('bkFacility').value);
+  if (!confirm(`Confirm booking?\n${fac.facilityName}\n${$('bkDate').value}  ${hm(start)} - ${hm(end)}`)) return;
+  try {
+    const body = { facilityId: +$('bkFacility').value, bookingDate: $('bkDate').value, startTime: start, endTime: end };
+    if (me.role === 'ADMIN') body.studentId = +$('bkStudent').value;
+    const b = await api('/bookings', 'POST', body);
+    toast('Booking confirmed. ID #' + b.bookingId);
+  } catch (e) { toast(e.message, false); }
+  loadSlots();
+}
+
+/* ---------- bookings / history ---------- */
+async function loadBookings() {
+  if (!facilities.length) facilities = await api('/facilities');
+  let sid = me.studentId;
+  if (me.role === 'ADMIN') {
+    if (!$('hsStudent').options.length) {
+      students = await api('/students');
+      $('hsStudent').innerHTML = students.map(s => `<option value="${s.studentId}">${s.studentId} - ${esc(s.studentName)}</option>`).join('');
+    }
+    sid = $('hsStudent').value;
+  }
+  if (!sid) { $('histBody').innerHTML = '<tr><td colspan="6" class="empty">No student selected</td></tr>'; return; }
+  const list = await api(`/students/${sid}/bookings` + (histStatus ? `?status=${histStatus}` : ''));
+  const fname = id => (facilities.find(f => f.facilityId === id) || {}).facilityName || ('#' + id);
+  $('histBody').innerHTML = list.map(b => `<tr><td>#${b.bookingId}</td><td>${esc(fname(b.facilityId))}</td><td>${b.bookingDate}</td><td>${hm(b.startTime)} - ${hm(b.endTime)}</td><td>${badge(b.status)}</td><td>${b.status === 'CONFIRMED' ? `<button class="btn btn-sm btn-danger" onclick="cancelBooking(${b.bookingId})">Cancel</button>` : ''}</td></tr>`).join('') ||
+    '<tr><td colspan="6" class="empty">No bookings found</td></tr>';
+}
+
+function setFilter(s, el) {
+  histStatus = s;
+  document.querySelectorAll('#chips button').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  safe(loadBookings);
+}
+
+async function cancelBooking(id) {
+  if (!confirm('Cancel this booking?')) return;
+  await safe(async () => { await api(`/bookings/${id}/cancel`, 'PUT'); toast('Booking cancelled'); await loadBookings(); });
+}
+
+/* ---------- students (admin) ---------- */
+async function loadStudents() {
+  students = await api('/students');
+  $('stuBody').innerHTML = students.map(s => `<tr><td>${s.studentId}</td><td>${esc(s.studentName)}</td><td>${esc(s.email)}</td><td>${esc(s.contactInfo || '-')}</td></tr>`).join('') ||
+    '<tr><td colspan="4" class="empty">No students yet</td></tr>';
+}
+
+/* ---------- start ---------- */
+async function logout() {
+  try { await api('/auth/logout', 'POST'); } catch (e) { }
+  localStorage.clear();
+  location.href = 'index.html';
+}
+
+(async function init() {
+  if (!token) { location.href = 'index.html'; return; }
+  try { me = await api('/auth/me'); } catch (e) { return; }
+  document.body.classList.toggle('admin', me.role === 'ADMIN');
+  $('uName').textContent = me.name;
+  $('uRole').textContent = me.role === 'ADMIN' ? 'Administrator' : 'Student';
+  if (me.role === 'ADMIN') document.querySelector('#nav a[data-page="bookings"]').textContent = 'Student Bookings';
+  $('today').textContent = new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  $('bkDate').min = todayStr();
+  document.querySelectorAll('#nav a').forEach(a => a.onclick = () => go(a.dataset.page));
+  go('dashboard');
+})();
+</script>
+</body>
+</html>
